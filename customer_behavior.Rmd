@@ -1,0 +1,569 @@
+---
+title: "Customer Predictions"
+author: "Lowrance, Mikala"
+date: "2024-07-27"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load libraries}
+library(MASS)
+library(caret)
+library(randomForest)
+library(gbm)
+library(rpart)
+library(rpart.plot)
+library(tidyverse)
+library(ISLR2)
+library(MLmetrics)
+library(MLeval)
+library(readr)
+```
+
+```{r Load data }
+customer <- read_csv("C:/Users/rayad/OneDrive/Desktop/Introduction to ML/Group Project/customer_purchase_data.csv")
+
+customer <- customer[!duplicated(customer), ] 
+
+breakpoints <- c(2)
+BreakPointsTimeSpent <- c(-Inf, 29, Inf)
+BreakPointsAge <-c (-Inf,40,Inf)
+
+customer <- customer %>% 
+  mutate(
+    AnnualIncome=log(AnnualIncome),
+    Gender=factor(Gender),
+    ProductCategory=factor(ProductCategory),
+    LoyaltyProgram=factor(LoyaltyProgram),
+    PurchaseStatus=factor(PurchaseStatus,levels = c(1, 0),labels = c("Yes", "No")),
+    TimeSpentBuckets = cut(customer$TimeSpentOnWebsite, 
+                       breaks = BreakPointsTimeSpent, 
+                       labels = as.factor(c('Low Time Spent', 'High Time Spent'))),
+    CatDiscountsAvailed = cut(customer$DiscountsAvailed, 
+                              breaks = breakpoints, 
+                              labels = as.factor(c('Low Discounts Availed', 'High Discounts Availed'))),
+    LoyaltyDiscInteraction = as.integer(customer$LoyaltyProgram)*unique_customers$DiscountsAvailed,
+    AgeBuckets = cut(customer$Age, 
+                    breaks = BreakPointsAge, 
+                    labels = as.factor(c('Low', 'High')))
+   
+    )
+summary(customer$ProductCategory)
+```
+
+```{r EDA Plots}
+ggplot(customer, aes(x = AnnualIncome, y = PurchaseStatus, color = PurchaseStatus)) +
+  geom_jitter(width = 0.2, height = 0.1) +
+  labs(title = "Annual Income vs Purchase Status", x = "Annual Income", y = "Purchase Status") +
+  theme_minimal()
+
+ggplot(customer, aes(x = TimeSpentOnWebsite, y = PurchaseStatus, color = PurchaseStatus)) +
+  geom_jitter(width = 0.2, height = 0.1) +
+  labs(title = "Time Spent on Websites vs Purchase Status", x = "Time Spent on Websites", y = "Purchase Status") +
+  theme_minimal()
+
+ggplot(customer, aes(x = Age, y = PurchaseStatus, color = PurchaseStatus)) +
+  geom_jitter(width = 0.2, height = 0.1) +
+  labs(title = "Time Spent on Websites vs Purchase Status", x = "Time Spent on Websites", y = "Purchase Status") +
+  theme_minimal()
+
+ggplot(customer, aes(x = Age, y = NumberOfPurchases, color = PurchaseStatus)) +
+  geom_jitter(width = 0.2, height = 0.1) +
+  labs(title = "Time Spent on Websites vs Purchase Status", x = "Time Spent on Websites", y = "Purchase Status") +
+  theme_minimal()
+
+ggplot(customer, aes(x = Gender, fill = PurchaseStatus)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Gender vs Purchase Status", x = "Gender", y = "Count") +
+  theme_minimal()
+
+ggplot(customer, aes(x = ProductCategory, fill = PurchaseStatus)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Product Category vs Purchase Status", x = "Product Category", y = "Count") +
+  theme_minimal()
+
+ggplot(customer, aes(x = LoyaltyProgram, fill = PurchaseStatus)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Product Category vs Purchase Status", x = "Product Category", y = "Count") +
+  theme_minimal()
+
+ggplot(customer, aes(x = ProductCategory, fill = PurchaseStatus)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Product Category vs Purchase Status", x = "Product Category", y = "Count") +
+  theme_minimal()
+```
+
+```{r Split data 80/20 }
+train_ix = createDataPartition(customer$PurchaseStatus,p = 0.8)
+status_train = customer[train_ix$Resample1,]
+status_test  = customer[-train_ix$Resample1,]
+```
+
+```{r Cross validation}
+kcv = 10
+cv_folds = createFolds(status_train$PurchaseStatus, k = kcv)
+
+my_summary = function(data, lev = NULL, model = NULL) {
+  default = defaultSummary(data, lev, model)
+  twoclass = twoClassSummary(data, lev, model)
+  twoclass[3] = 1-twoclass[3]
+  names(twoclass) = c("AUC_ROC", "TPR", "FPR") #just renaming
+  logloss = mnLogLoss(data, lev, model)
+  c(default,twoclass, logloss) 
+}
+fit_control <- trainControl(
+  method = "cv",
+  indexOut = cv_folds,
+  classProbs = TRUE,
+  savePredictions = TRUE,
+  summaryFunction = my_summary,
+  selectionFunction="oneSE")
+
+rf_fit_control <- trainControl(
+  method = "cv",
+  indexOut = cv_folds,
+  classProbs = TRUE,
+  savePredictions = TRUE,
+  summaryFunction = my_summary,
+  selectionFunction="oneSE")
+```
+
+```{r Logistic Regression - Train}
+logisticModel <- glm(PurchaseStatus ~ ., data = status_train, family = binomial)
+summary(logisticModel)
+```
+
+```{r Decision Tree - Train}
+decisionTree <- rpart(PurchaseStatus ~ ., data = status_train, method = "class", control = rpart.control(cp = 0.01))
+rpart.plot(decisionTree)
+```
+
+```{r Bagging - Train}
+bag_fit <- train(PurchaseStatus ~ ., data = status_train, 
+                 method = "treebag",
+                 trControl = fit_control,
+                 nbagg = 1000)
+
+bagfit_res = thresholder(bag_fit, threshold = seq(0.0005, 1, by = 0.005),final = TRUE)
+
+pldf = bagfit_res %>%
+  mutate(TPR=Sensitivity, FPR = 1-Specificity, FNR = 1-Sensitivity) %>%
+  pivot_longer(cols = -c(parameter, prob_threshold), 
+               names_to = "name", 
+               values_to = "value")
+```
+
+```{r Bagging - Training Plots}
+# 
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("TPR", "FPR"))) + 
+  geom_line() 
+
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("FNR", "FPR"))) + 
+  geom_line() 
+
+optim_J_bag = bagfit_res[which.max(bagfit_res$J),]
+
+# ROC Curve
+
+ggplot(aes(x=prob_threshold, y=J), 
+       data=bagfit_res) + 
+  geom_line() + 
+  geom_vline(aes(xintercept=optim_J$prob_threshold), lty=2)
+
+ggplot(aes(x=1-Specificity, y=Sensitivity), data=bagfit_res) + 
+  geom_line() + 
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept=0, slope=1, linetype='dotted') +
+  geom_segment(aes(x=1-Specificity, xend=1-Specificity, y=1-Specificity, yend=Sensitivity), color='darkred', data=optim_J_bag) + 
+  theme_bw()
+
+# PR Curve
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("Precision", "Recall"))) + 
+  geom_line() 
+
+ggplot(aes(x=Recall, y=Precision), data=bagfit_res) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Precision") + 
+  xlab("Recall (TPR)") + 
+  geom_point(aes(x=Recall, y=Precision), color='darkred', data=optim_J_bag) + 
+  theme_bw()
+
+# Lift Curve
+best_preds <- bag_fit$pred
+
+pred_df <- data.frame(
+  obs = best_preds$obs,  # Observed outcomes
+  Yes = best_preds$Yes   # Predicted probabilities for the positive class (e.g., "Yes")
+)
+
+bagfit_lift <- caret::lift(obs ~ Yes, data = pred_df)
+
+ggplot(bagfit_lift) +
+  geom_abline(slope = 1, linetype = 'dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw() +
+  labs(title = "Lift Chart for Bagged Model",
+       x = "Percentage of Data",
+       y = "Lift")
+
+# Calibration 
+gbm_bag = caret::calibration(obs~Yes, data=best_preds, cuts=7)
+ggplot(gbm_bag) + theme_bw()
+```
+
+```{r Random Forest - Training}
+# Change max nodes in RF model later
+tune_Grid = expand.grid(mtry=c(1,2,3,4)) 
+
+rfModel = train(PurchaseStatus ~ ., data = status_train,
+                method = "rf",
+                ntree = 1500,
+                trControl = rf_fit_control,
+                tuneGrid = tune_Grid,
+                importance = TRUE)
+```
+
+```{r Random Forest - Training Plots}
+
+# ROC Curve
+rffit_res = thresholder(rfModel, threshold = seq(0.0005, 1, by = 0.005), final = TRUE)
+optim_J_rf = rffit_res[which.max(rffit_res$J),]
+
+ggplot(aes(x=prob_threshold, y=J), 
+       data=rffit_res) + 
+  geom_line() + 
+  geom_vline(aes(xintercept=optim_J_rf$prob_threshold), lty=2)
+
+ggplot(aes(x= 1- Specificity, y= Sensitivity), data = rffit_res) + 
+  geom_line() + 
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept=0, slope=1, linetype='dotted') +
+  geom_segment(aes(x=1-Specificity, xend=1-Specificity, y=1-Specificity, yend=Sensitivity), color='darkred', data=optim_J_rf) +
+  theme_bw()
+
+#PR Curve
+
+rf_pr_df <- rffit_res %>%
+  select(prob_threshold, Precision, Recall)
+
+ggplot(aes(x=Recall, y=Precision), data=rf_pr_df) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Precision") + 
+  xlab("Recall (TPR)") + 
+  geom_point(aes(x= Recall, y= Precision), data = optim_J_rf, color='darkred', size=3) + 
+  theme_bw()
+
+# Lift Curve 
+
+```
+
+```{r Boosting - Training}
+set.seed(702)
+gbm_grid <- expand.grid(
+  interaction.depth= c(3, 5, 7, 10, 12),
+  n.trees = c(300, 500, 700),
+  shrinkage = c(0.15, 0.1,0.2, 0.25),
+  n.minobsinnode = c(3, 5,10,12,15) 
+)
+
+gbmfit <- train(
+  PurchaseStatus~.-TimeSpentOnWebsite, data = status_train,
+  method = 'gbm',
+  trControl = fit_control,
+  tuneGrid = gbm_grid,
+  metric = 'logLoss',
+  verbose = FALSE
+)
+confusionMatrix(gbmfit)
+
+thresholder(
+            gbmfit,
+            threshold = 0.5,
+            final = TRUE,
+            statistics = c('Sensitivity',
+                           'Specificity')
+            )
+
+gbmfit_res = thresholder(gbmfit,
+                         threshold = seq(0.0005, 1, by = 0.005),
+                         final = TRUE)
+print(gbmfit_res)
+```
+
+```{r Boosting - Training Plots}
+pldf = gbmfit_res %>% 
+  mutate(TPR = Sensitivity, FPR = 1 - Specificity, FNR = 1 - Sensitivity) %>% 
+  dplyr::select(-c(n.trees, interaction.depth, shrinkage, n.minobsinnode)) %>% 
+  pivot_longer(-prob_threshold)
+
+ggplot(aes(x=prob_threshold, y=value, color = name),
+       data = pldf %>% filter(name %in% c('TPR', 'FPR'))) +
+  geom_line()
+
+ggplot(aes(x=prob_threshold, y= value, color = name),
+       data = pldf %>% filter(name %in% c('FNR', 'FPR'))) + 
+  geom_line()
+
+# ROC Curve
+optim_J = gbmfit_res[which.max(gbmfit_res$J),]
+
+ggplot(aes(x=prob_threshold, y=J),
+       data = gbmfit_res) + 
+  geom_line() + 
+  geom_vline(aes(xintercept = optim_J$prob_threshold), lty = 2)
+
+ggplot(aes(x=1 - Specificity, y = Sensitivity), data = gbmfit_res) + 
+  geom_line() + 
+  ylab('TPR (Sensitivity)') +
+  xlab('FPR (1-Specificity)') +
+  geom_abline(intercept = 0, slope = 1, linetype = 'dotted') + 
+  geom_segment(aes(x = 1-Specificity, xend=1-Specificity, y = Sensitivity, yend = Sensitivity), color = 'darkred', data = optim_J) + theme_bw()
+
+#PR Curve
+ggplot(aes(x=prob_threshold, y=value, color = name),
+       data=pldf %>% filter(name %in% c('Precision','Recall')))+
+  geom_line()
+
+ggplot(aes(x=Recall, y = Precision), data = gbmfit_res) + 
+  geom_point() + 
+  geom_line() +
+  ylab('Precision') +
+  xlab('Recall (TPR)') +
+  geom_point(aes(x=Recall, y=Precision), color = 'darkred', data = optim_J) +
+  theme_bw()
+
+#Lift Curve
+best_pars = gbmfit$bestTune
+best_preds = gbmfit$pred %>% filter(n.trees==best_pars$n.trees, interaction.depth==best_pars$interaction.depth)
+
+gbm_lift = caret::lift(obs~Yes, data = best_preds)
+
+ggplot(gbm_lift) + 
+  geom_abline(slope = 1, linetype = "dotted") + 
+  xlim(c(0,100)) + 
+  theme_bw()
+
+gbm_cal = caret:: calibration(obs~Yes, data = best_preds, cuts = 7)
+ggplot(gbm_cal) + theme_bw()
+```
+
+```{r Logistic Regression - Test Results}
+# Tweak the threshold
+logistic_predictions <- predict(logisticModel, status_test, type = "response")
+logistic_pred_classes <- ifelse(logistic_predictions > 0.65, "No", "Yes")
+confusionMatrix(factor(logistic_pred_classes), status_test$PurchaseStatus)
+```
+
+```{r Logistic Regression - Test Plots}
+
+```
+
+
+```{r Bagging - Test Results}
+test_bag = predict(bag_fit, newdata=status_test, type="prob")
+test_preds_bag <- factor(ifelse(test_bag[, "Yes"] > optim_J_bag$prob_threshold, "Yes", "No"))
+
+get_metrics = function(threshold, test_bag, true_class, 
+                       pos_label, neg_label) {
+  
+  # Get class predictions
+  pc = factor(ifelse(test_bag[pos_label]>threshold, pos_label, neg_label), levels=c(pos_label, neg_label))
+  test_set = data.frame(obs = true_class, pred = pc, test_bag)
+  my_summary(test_set, lev=c(pos_label, neg_label))
+}
+```
+
+```{r Bagging - Test Plots}
+thr_seq = seq(0, 1, length.out=500)
+metrics = lapply(thr_seq, function(x) get_metrics(x, test_bag, status_test$PurchaseStatus, "Yes", "No"))
+metrics_df = data.frame(do.call(rbind, metrics))
+
+# ROC Curve 
+ggplot(aes(x=FPR, y=TPR), data=metrics_df) + 
+  geom_line() +
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept=0, slope=1, linetype='dotted') +
+  annotate("text", x=0.75, y=0.25, 
+           label=paste("AUC:",round(metrics_df$AUC_ROC[1], 2))) +
+  theme_bw()
+
+#PR 
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("Precision", "Recall"))) + 
+  geom_line() 
+#
+#ggplot(aes(x=Recall, y=Precision), data=metrics_df) + 
+#  geom_point() + 
+# geom_line() + 
+#  ylab("Precision") + 
+#  xlab("Recall (TPR)") + 
+ # geom_point(aes(x=Recall, y=Precision), color='darkred', data=optim_J) + 
+ # theme_bw()
+
+# Lift Curve
+bag_oos_lift = caret::lift(status_test$PurchaseStatus~test_bag[,1])
+
+ggplot(bag_oos_lift) + 
+  geom_abline(slope=1, linetype='dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+
+#Calibration
+bag_cal = caret::calibration(status_test$PurchaseStatus~test_bag[,1], 
+                             data=best_preds, cuts=7)
+ggplot(bag_cal) + theme_bw()
+```
+
+```{r Random Forest - Test Results}
+test_rf <- predict(rfModel, newdata = status_test)
+print(confusionMatrix(test_rf, status_test$PurchaseStatus))
+print(varImp(rfModel))
+```
+
+```{r Random Forest -  Test Plots}
+thr_seq = seq(0, 1, length.out=500)
+metrics = lapply(thr_seq, function(x) get_metrics(x, test_rf, status_test$PurchaseStatus, "Yes", "No"))
+metrics_df = data.frame(do.call(rbind, metrics))
+
+# ROC Curve 
+ggplot(aes(x=FPR, y=TPR), data=metrics_df) + 
+  geom_line() +
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept=0, slope=1, linetype='dotted') +
+  annotate("text", x=0.75, y=0.25, 
+           label=paste("AUC:",round(metrics_df$AUC_ROC[1], 2))) +
+  theme_bw()
+
+#PR
+ggplot(aes(x=prob_threshold, y=value, color=name), 
+       data=pldf %>% filter(name %in% c("Precision", "Recall"))) + 
+  geom_line() 
+
+#ggplot(aes(x=Recall, y=Precision), data=metrics_df) + 
+ # geom_point() + 
+ # geom_line() + 
+  #ylab("Precision") + 
+  #xlab("Recall (TPR)") + 
+  #geom_point(aes(x=Recall, y=Precision), color='darkred', data=optim_J) + 
+ # theme_bw()
+
+# Lift Curve
+rf_oos_lift = caret::lift(status_test$PurchaseStatus~test_rf[,1])
+
+ggplot(rf_oos_lift) + 
+  geom_abline(slope=1, linetype='dotted') +
+  xlim(c(0, 100)) + 
+  theme_bw()
+
+#Calibration
+bag_cal = caret::calibration(status_test$PurchaseStatus~test_rf[,1], 
+                             data=best_preds, cuts=7)
+ggplot(bag_cal) + theme_bw()
+```
+
+```{r Boosting - Test Results}
+test_probs = predict(gbmfit, newdata = status_test, type='prob')
+
+get_metrics = function(threshold, test_probs, true_class, 
+                       pos_label, neg_label){
+  pc = factor(ifelse(test_probs[pos_label]>threshold, pos_label, neg_label), levels=c(pos_label, neg_label))
+  test_set = data.frame(obs= true_class, pred=pc, test_probs)
+  my_summary(test_set, lev= c(pos_label, neg_label))
+}
+
+get_metrics(optim_J$prob_threshold, test_probs, status_test$PurchaseStatus, 'Yes', 'No')
+
+thr_seq = seq(0,1, length.out = 500)
+metrics = lapply(thr_seq, function(x) get_metrics(x, test_probs, status_test$PurchaseStatus, 'Yes', 'No'))
+metrics_df = data.frame(do.call(rbind, metrics))
+varImp(gbmfit)
+```
+
+```{r Boosting - Test Plots}
+# ROC Curve
+ggplot(aes(x=FPR, y = TPR), data = metrics_df) +
+  geom_line() +
+  ylab('TPR (Sensitivity)') +
+  xlab('FPR (1-Specificity)') +
+  geom_abline(intercept = 0, slope = 1, linetype = 'dotted') + 
+  annotate('text', x=0.75, y=0.25, label = paste('AUC:', round(metrics_df$AUC_ROC[1], 2)))
+
+#PR 
+
+# Lift Curve
+gbm_oos_lift = caret::lift(status_test$PurchaseStatus~test_probs[,1])
+
+ggplot(gbm_oos_lift) +
+  geom_abline(slope = 1, linetype ='dotted') +
+  xlim(c(0,100)) + 
+  theme_bw()
+
+# Calibration
+gbm_cal = caret::calibration(status_test$PurchaseStatus~test_probs[,1], data = best_preds, cuts = 7)
+
+ggplot(gbm_cal) + theme_bw()
+```
+
+```{r Collated graphs }
+#ROC Curve
+rffit_res = thresholder(rfModel, threshold = seq(0.0005, 1, by = 0.005), final = TRUE)
+optim_J_rf = rffit_res[which.max(rffit_res$J),]
+
+bagfit_res = thresholder(bag_fit, threshold = seq(0.0005, 1, by = 0.005),final = TRUE)
+optim_J_bag = bagfit_res[which.max(bagfit_res$J),]
+
+optim_J_boost = thresholder(gbmfit, threshold = seq(0.0005, 1, by = 0.005),final = TRUE)
+optim_J_boost = gbmfit_res[which.max(gbmfit_res$J),]
+
+rffit_res$model <- "Random Forest"
+bagfit_res$model <- "Bagging"
+gbmfit_res$model <-"Boosting"
+
+combined_res <- rbind(rffit_res[, c("Specificity", "Sensitivity", "model")],
+                      bagfit_res[, c("Specificity", "Sensitivity", "model")],
+                      gbmfit_res[, c("Specificity", "Sensitivity", "model")])
+
+ggplot(combined_res, aes(x = 1 - Specificity, y = Sensitivity, color = model)) + 
+  geom_line() + 
+  ylab("TPR (Sensitivity)") + 
+  xlab("FPR (1-Specificity)") + 
+  geom_abline(intercept = 0, slope = 1, linetype = 'dotted') +
+  geom_segment(data = optim_J_rf, aes(x = 1 - Specificity, xend = 1 - Specificity, y = 1 - Specificity, yend = Sensitivity), color = 'darkred') +
+  geom_segment(data = optim_J_bag, aes(x = 1 - Specificity, xend = 1 - Specificity, y = 1 - Specificity, yend = Sensitivity), color = 'darkblue') +
+  geom_segment(data = optim_J_boost, aes(x = 1 - Specificity, xend = 1 - Specificity, y = 1 - Specificity, yend = Sensitivity), color = 'green') +
+  theme_bw() +
+  labs(color = "Model")+
+  xlim(0, 0.2)
+  
+  
+# Lift Curve
+# pr_df_all <- bind_rows(rf_pr_df, pldf)
+  
+#ggplot(aes(x=rffit_res, y=value, color=name), 
+#       data=pldf %>% filter(name %in% c("Precision", "Recall"))) + 
+#  geom_line() 
+
+#ggplot(pr_df_all, aes(x=Recall, y=Precision)) + 
+ # geom_point() + 
+ # geom_line() + 
+ # labs(title = "Precision-Recall Curve: All Tree Models",
+ #      x = "Recall (TPR)",
+ #      y = "Precision") +
+ # theme_bw()
+
+# Lift Curve
+ 
+```
+
